@@ -175,10 +175,21 @@ class LlamaCppBridge(
         val pattern = ("\"" + field + "\"\\s*:\\s*(\"(?:[^\"\\\\]|\\\\.)*\"|[^,}\\s]+)").toRegex()
         val match = pattern.find(json) ?: return null
         val raw = match.groupValues[1]
-        return if (raw.length >= 2 && raw.startsWith("\"") && raw.endsWith("\"")) {
-            unescapeJson(raw.substring(1, raw.length - 1))
-        } else {
-            raw
+        return when {
+            // Quoted value: the alternative only matches through a real terminator,
+            // so this is a well-formed JSON string.
+            raw.startsWith("\"") && raw.length >= 2 && raw.endsWith("\"") ->
+                unescapeJson(raw.substring(1, raw.length - 1))
+
+            // The bare-value branch matched something starting with a quote: the
+            // string was never terminated (truncated body). Returning it would
+            // hand back half a token as if it were real output.
+            raw.startsWith("\"") -> null
+
+            // JSON null is an absent value, not the literal word "null".
+            raw == "null" -> null
+
+            else -> raw
         }
     }
 

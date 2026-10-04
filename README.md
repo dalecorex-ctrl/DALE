@@ -113,17 +113,34 @@ On Android/NDK the headers come from the toolchain sysroot automatically.
 
 ### Tests
 
-See `test/` — 47 JUnit 4 tests covering package/API consistency, router ↔
+See `test/` — 59 JUnit 4 tests covering package/API consistency, router ↔
 registry ↔ capability integration, invalid/unknown capability handling, JNI
 declaration ↔ implementation correspondence, security regressions (including
 *enforcement*: unconfirmed and destructive requests are proven not to execute),
-and bounded execution (timeout, process termination, no orphan survivors).
+bounded execution (timeout, process termination, no orphan survivors), and the
+`LlamaCppBridge` contract.
+
+`test/LlamaCppBridgeTest.kt` is a **deterministic integration probe**: it starts
+an in-process HTTP server on an ephemeral port and proves connection failure,
+HTTP failure, malformed / `null` / truncated responses, read timeout, streaming
+order, and descriptor cleanup — with no model, GPU, or network required.
 
 A runnable end-to-end check sits alongside them:
 
 ```bash
 java -cp "…" com.lanie.workspace.SmokeTestKt   # 13 checks; exits non-zero on any failure
 ```
+
+To exercise the bridge against a **real** llama.cpp server (not part of the
+suite, since it cannot be assumed):
+
+```bash
+llama-server --model model.gguf --host 127.0.0.1 --port 8080
+# then POST http://127.0.0.1:8080/completion — the bridge's endpoint
+```
+
+Note the bridge targets llama.cpp's legacy `/completion` endpoint, not the
+OpenAI-compatible `/v1/chat/completions`; both are served by the same binary.
 
 ---
 
@@ -167,4 +184,12 @@ is currently dormant.
   but `mobile_runtime_native` does not reference them yet, so it does not link
   against it.
 - `MemoryManager.kt` compiles against `android.jar`, but has never been *run* —
-  executing it requires a real Android runtime.
+  executing it requires a real Android runtime. Known limitations found by
+  audit, **not yet fixed** because they cannot be exercised here:
+  - `onUpgrade` runs `DROP TABLE` + `onCreate`, so a schema-version bump
+    **discards existing memories** (host-verified against an equivalent schema);
+  - `saveMemory` uses `CONFLICT_REPLACE`, which deletes-then-inserts, so the row
+    `id` is **not stable** across saves and `AUTOINCREMENT` ids are burned;
+  - the `content` column has no `NOT NULL` constraint while the Kotlin field is
+    non-null, so an externally inserted `NULL` row would surface as a platform
+    type and can throw on read.
