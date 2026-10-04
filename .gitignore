@@ -1,0 +1,45 @@
+# LANIE Android Runtime — ignore vendored trees, archives and build output.
+#
+# Rationale: whisper.cpp-master/ and agent-native-main/ are third-party source
+# trees (and their .zip duplicates) that are not authored here. They are
+# referenced by CMakeLists.txt via an explicit guarded path, and are restored by
+# the bootstrap step in README.md.
+
+# --- vendored third-party (restored by bootstrap) ---
+whisper.cpp-master/
+whisper.cpp-master.zip
+agent-native-main/
+agent-native-main.zip
+
+# --- build output ---
+build/
+cmake-build*/
+*.o
+*.so
+*.so.*
+*.a
+
+# --- IDE / tooling state ---
+.cg/
+.pytest_cache/
+.idea/
+*.iml
+
+# --- secrets (never commit signing material) ---
+release.keystore
+release.properties
+*.keystore
+*.jks
+
+# --- python (Phase 5 stays separate; keep these out regardless) ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+
+# --- kotlin / java ---
+*.class
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
