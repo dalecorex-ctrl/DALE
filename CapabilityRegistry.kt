@@ -12,6 +12,13 @@ class CapabilityRegistry {
     suspend fun invokeCapability(request: CapabilityRequest): CapabilityResult {
         val capability = capabilities[request.actionId]
             ?: return CapabilityResult(false, null, "Capability not found for action ID: ${request.actionId}")
-        return capability.execute(request)
+        return try {
+            capability.execute(request)
+        } catch (e: Exception) {
+            // Keep failure semantics identical to AgentGatewayRouter.routeRequest:
+            // an escaping exception must surface as a failed result, never as a
+            // crash on one entry point and a result on the other.
+            CapabilityResult(false, null, "Execution failed: ${e.localizedMessage}")
+        }
     }
 }

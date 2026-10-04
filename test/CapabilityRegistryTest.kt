@@ -2,6 +2,7 @@ package com.lanie.workspace
 
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -15,7 +16,10 @@ class CapabilityRegistryTest {
     private fun request(actionId: String, command: String? = null) = CapabilityRequest(
         actionId = actionId,
         targetPackage = "com.lanie.workspace",
-        parameters = command?.let { mapOf("command" to it) } ?: emptyMap()
+        parameters = buildMap {
+            if (command != null) put("command", command)
+            put(ShellCapability.USER_CONFIRMATION_KEY, ShellCapability.CONFIRMATION_VALUE)
+        }
     )
 
     @Test
@@ -90,6 +94,39 @@ class CapabilityRegistryTest {
         assertTrue(result.errorMessage!!.contains("3"))
         // Partial output must still be surfaced to the caller.
         assertEquals("partial\n", result.outputData!!["output"])
+    }
+
+    @Test
+    fun `shell capability enforces a timeout and terminates the process`() = runBlocking {
+        val registry = CapabilityRegistry()
+        registry.register(ShellCapability(".", timeoutSeconds = 1))
+
+        val marker = java.io.File("/tmp/opencode/capability_timeout_marker")
+        marker.delete()
+
+        val started = System.currentTimeMillis()
+        val result = registry.invokeCapability(
+            CapabilityRequest(
+                actionId = "execute_shell_command",
+                targetPackage = "com.lanie.workspace",
+                parameters = mapOf(
+                    "command" to "sleep 3; touch ${marker.absolutePath}",
+                    ShellCapability.USER_CONFIRMATION_KEY to ShellCapability.CONFIRMATION_VALUE
+                )
+            )
+        )
+        val elapsed = System.currentTimeMillis() - started
+
+        assertTrue("timeout must surface as failure", !result.success)
+        assertTrue(
+            "timeout must be named in the error, got: ${result.errorMessage}",
+            result.errorMessage!!.contains("timed out")
+        )
+        assertTrue("must return near the 1s timeout, took ${elapsed}ms", elapsed < 4000)
+
+        // `sleep 3` would create this marker at t=3s if it survived termination.
+        Thread.sleep(4000)
+        assertFalse("the process must not outlive the timeout", marker.exists())
     }
 
     @Test

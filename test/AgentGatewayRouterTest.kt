@@ -15,7 +15,10 @@ class AgentGatewayRouterTest {
     private fun request(actionId: String, command: String? = null) = CapabilityRequest(
         actionId = actionId,
         targetPackage = "com.lanie.workspace",
-        parameters = command?.let { mapOf("command" to it) } ?: emptyMap()
+        parameters = buildMap {
+            if (command != null) put("command", command)
+            put(ShellCapability.USER_CONFIRMATION_KEY, ShellCapability.CONFIRMATION_VALUE)
+        }
     )
 
     @Test

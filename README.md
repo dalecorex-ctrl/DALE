@@ -32,8 +32,8 @@ between them. Nothing from this repository has been merged into Phase 5.
 | Layer | Contents | Status |
 |-------|----------|--------|
 | Kotlin capability layer | `Capability*`, `ShellCapability`, `CapabilityRegistry`, `AgentGatewayRouter`, `TerminalRunner`, `ScriptValidator`, `PingTest` | builds + runs |
-| Kotlin Android layer | `MemoryManager` (SQLite) | needs Android SDK |
-| Kotlin LLM bridge | `LlamaCppBridge` (llama.cpp HTTP/SSE client) | builds |
+| Kotlin Android layer | `MemoryManager` (SQLite) | compiles against `android.jar` (API 28) |
+| Kotlin LLM bridge | `LlamaCppBridge` (llama.cpp HTTP/SSE client) | builds; verified against a live server |
 | JNI bridge | `NativeRuntimeBridge` ↔ `native_bridge.cpp` | builds + runs |
 | Native | `whisper.cpp` + `ggml` via CMake | builds |
 
@@ -48,19 +48,32 @@ main / caller
       ← CapabilityResult(success, outputData, errorMessage)
 ```
 
-`TerminalRunner` is the streaming/time-out variant of shell execution;
-`ScriptValidator` performs static policy checks **before** execution.
+`ShellCapability` delegates all process handling to `TerminalRunner`, which
+imposes a hard timeout, closes child stdin, reaps the whole process tree, joins
+its reader threads under a bound, and honours cooperative cancellation.
+`ScriptValidator` performs the static policy check **before** execution, and the
+`requiresUserConfirmation` gate is enforced inside `ShellCapability` itself, so
+every entry point (router, registry, `main`) passes through it.
 
 ---
 
 ## Security model
 
 - Every capability declares a `CapabilityRisk` (level + `requiresUserConfirmation`).
-- `ShellCapability` is `RiskLevel.HIGH` and `requiresUserConfirmation = true`.
+- `ShellCapability` is `RiskLevel.HIGH` and `requiresUserConfirmation = true`,
+  and the declaration is **enforced, not decorative**: a request missing
+  `user_confirmation=true` fails closed without spawning anything. The check
+  lives in the capability, so no entry point can bypass it. The value must match
+  exactly (`true` is accepted; `yes`/`1`/`TRUE` are not).
 - `ScriptValidator` blocks destructive patterns (`rm -rf /`, `mkfs`, fork bombs,
-  `os.system('rm`, `shutil.rmtree("/")`). It is a **pure static check** — it never
-  executes what it inspects (asserted by test).
+  `os.system('rm`, `shutil.rmtree("/")`). It runs on the **live execution
+  path**, so a blocked command never reaches `sh -c` — proven by a test that
+  would create a marker file if execution ever happened. It is a **pure static
+  check** — it never executes what it inspects (asserted by test).
 - Unknown `actionId` values fail closed; they never resolve to a real capability.
+- Execution is bounded: hard timeout, whole-process-tree termination, closed
+  child stdin, bounded reader joins, and cooperative cancellation, so a
+  runaway command cannot outlive its caller.
 
 Tests in `test/ScriptValidatorTest.kt` (`SecurityRegressionTest`) guard these
 invariants so they cannot be silently weakened.
@@ -81,7 +94,12 @@ kotlinc Capability.kt CapabilityRequest.kt CapabilityResult.kt CapabilityRisk.kt
 java -cp "out:kotlinx-coroutines-core-jvm.jar:kotlin-stdlib.jar" com.lanie.workspace.MainKt
 ```
 
-`MemoryManager.kt` is excluded here: it needs `android.jar` from the Android SDK.
+`MemoryManager.kt` is excluded from the host build above: it needs `android.jar`
+from the Android SDK. With a platform installed it compiles on its own:
+
+```bash
+kotlinc MemoryManager.kt -classpath /usr/lib/android-sdk/platforms/android-28/android.jar -d out-mm
+```
 
 ### Native layer (host)
 
@@ -95,25 +113,58 @@ On Android/NDK the headers come from the toolchain sysroot automatically.
 
 ### Tests
 
-See `test/` — 41 JUnit 4 tests covering package/API consistency, router ↔
+See `test/` — 47 JUnit 4 tests covering package/API consistency, router ↔
 registry ↔ capability integration, invalid/unknown capability handling, JNI
-declaration ↔ implementation correspondence, and security regressions.
+declaration ↔ implementation correspondence, security regressions (including
+*enforcement*: unconfirmed and destructive requests are proven not to execute),
+and bounded execution (timeout, process termination, no orphan survivors).
+
+A runnable end-to-end check sits alongside them:
+
+```bash
+java -cp "…" com.lanie.workspace.SmokeTestKt   # 13 checks; exits non-zero on any failure
+```
 
 ---
 
 ## Vendor bootstrap
 
 `whisper.cpp-master/` and `agent-native-main/` are third-party trees, excluded
-from this repository by `.gitignore` and restored locally as needed. CMake guards
-the optional `agent-native` integration with `if(EXISTS …)` so its absence never
-breaks the build.
+from this repository by `.gitignore`. Restore them from the archives kept beside
+the sources:
+
+```bash
+# Required: the native build HARD-FAILS without whisper.cpp-master.
+unzip -q whisper.cpp-master.zip
+
+# Optional: only used if agent-native-main/src ever exists.
+unzip -q agent-native-main.zip
+```
+
+CMake treats the two differently, on purpose:
+
+| Tree | If missing |
+|------|------------|
+| `whisper.cpp-master/` | `message(FATAL_ERROR …)` — configure **fails**, because `whisper` is a required link dependency of `mobile_runtime_native` |
+| `agent-native-main/src/` | guarded by `if(EXISTS …)`, builds without it and prints a status line |
+
+The `agent-native` guard covers only the *sources*; note that `agent-native-main`
+as shipped is a JS/TS tree with no `src/` or `include/`, so the C++ integration
+is currently dormant.
 
 ---
 
 ## Not yet done
 
-- No Gradle project, `AndroidManifest.xml`, or Android SDK/NDK on the audit host:
-  **this runtime has never been built into an APK.**
+- **No APK.** There is no Gradle project and no `AndroidManifest.xml`, and the
+  host has no NDK and no `d8`/dexer. A platform jar (`android.jar`, API 28) and
+  `aapt2`/`zipalign`/`apksigner` are present, but that alone cannot package,
+  dex, or sign an application. The Kotlin layer is therefore **build-proven and
+  host-runnable**, not installable.
 - `native_bridge.cpp` methods are **placeholders** — they verify JNI symbol
   resolution and marshalling, but do not yet call into whisper inference.
-- `MemoryManager.kt` has never been compiled.
+  `libwhisper` is built from the vendored tree and exports the expected symbols,
+  but `mobile_runtime_native` does not reference them yet, so it does not link
+  against it.
+- `MemoryManager.kt` compiles against `android.jar`, but has never been *run* —
+  executing it requires a real Android runtime.
